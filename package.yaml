@@ -46,6 +46,7 @@ dependencies:
 - bytestring
 - time
 - forge
+- validation
 
 library:
   source-dirs: src
