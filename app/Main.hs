@@ -98,6 +98,8 @@ getPassR = do
        (div_
           [class_ "wrap"]
           (do h2_ "Set password"
+              p_ "Set the password for your personal use."
+              p_ "Write down your password somewhere so that you don't forget it."
               url <- ask
               form_
                 [action_ (url PassR), method_ "POST"]
@@ -206,11 +208,12 @@ postPostR = do
 
 getDashboardR :: Handler (Html ())
 getDashboardR = do
-  (groupId, _memberId) <- getSessionInfo
-  Group {..} <-
+  (groupId, memberId) <- getSessionInfo
+  (Group {..},Member{..}) <-
     runDB
       (do grp <- get404 groupId
-          pure grp)
+          mem <- get404 memberId
+          pure (grp,mem))
   htmlWithUrl
     (layoutWrapper
        (div_
@@ -218,8 +221,13 @@ getDashboardR = do
           (do h2_
                 (do "Dashboard for "
                     toHtml groupPostcode)
+              p_ (do "Your personal login code is: "
+                     strong_ (code_ (toHtml memberCode))
+                     " (Don't lose this.)")
               url <- ask
-              p_ (a_ [href_ (url PostR)] "Post an update"))))
+              p_ (do a_ [href_ (url PostR)] "Post an update"
+                     " | "
+                     a_ [href_ (url PassR)] "Change password"))))
 
 getCreateGroupR :: Handler (Html ())
 getCreateGroupR =
@@ -263,7 +271,7 @@ postCreateGroupR = do
                   pure (gid, memberId))
           setSession "groupId" (T.pack (show (fromSqlKey groupId)))
           setSession "memberId" (T.pack (show (fromSqlKey memberId)))
-          redirect DashboardR
+          redirect PassR
 
 getHomeR :: Handler (Html ())
 getHomeR = do
