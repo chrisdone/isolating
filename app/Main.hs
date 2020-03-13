@@ -75,10 +75,31 @@ mkYesod "App" [parseRoutes|
   / HomeR GET
   /create-group CreateGroupR POST GET
   /dashboard DashboardR GET
+  /post PostR GET
 |]
 
 --------------------------------------------------------------------------------
 -- Routes
+
+getPostR :: Handler (Html ())
+getPostR = do
+  (groupId, memberId) <- getSessionInfo
+  Group {..} <-
+    runDB
+      (do grp <- get404 groupId
+          pure grp)
+  htmlWithUrl
+    (layoutWrapper
+       (div_
+          [class_ "wrap"]
+          (do h2_
+                (do "Post update for "
+                    toHtml groupPostcode)
+              url <- ask
+              form_
+                [action_ (url PostR), method_ "POST"]
+                (do relaxHtmlT (Forge.view (Forge.verified postUpdateForm))
+                    p_ (button_ "POST UPDATE")))))
 
 getDashboardR :: Handler (Html ())
 getDashboardR = do
@@ -91,9 +112,11 @@ getDashboardR = do
     (layoutWrapper
        (div_
           [class_ "wrap"]
-          (h2_
-             (do "Dashboard for "
-                 toHtml groupPostcode))))
+          (do h2_
+                (do "Dashboard for "
+                    toHtml groupPostcode)
+              url <- ask
+              p_ (a_ [href_ (url PostR)] "Post an update"))))
 
 getCreateGroupR :: Handler (Html ())
 getCreateGroupR =
@@ -232,6 +255,43 @@ createGroupForm =
                        html))
        postcodeField)
 
+data UpdateInfo = UpdateInfo
+  { healthStatus :: Status
+  , title :: Text
+  , desc :: Text
+  }
+
+postUpdateForm :: Forge.Form index Identity (Html ()) Forge.Field IsolatingError UpdateInfo
+postUpdateForm =
+  UpdateInfo <$>
+  wrapErrorsAllowBubble
+    "Condition"
+    (wrapHtml
+       (\html ->
+          p_
+            (do label_ "Condition: "
+                html))
+       (dropdownField
+          Nothing
+          (fmap
+             (\x -> (x, T.pack (show x)))
+             (pure Asymptomatic <> pure Isolating <> pure Recovered)))) <*>
+  wrapErrorsAllowBubble
+    "Title"
+    (wrapHtml
+       (\html ->
+          p_
+            (do label_ "Title: "
+                html))
+       requiredTextField) <*>
+  wrapErrorsAllowBubble
+    "Comment"
+    (wrapHtml
+       (\html -> do
+          p_ (label_ "Comment: ")
+          p_ html)
+       requiredTextareaField)
+
 --------------------------------------------------------------------------------
 -- Fields
 
@@ -304,6 +364,16 @@ requiredTextField =
             then Left TextNotProvided
             else Right t))
     (Forge.FieldForm Forge.DynamicFieldName (Forge.TextField Nothing))
+
+requiredTextareaField :: Forge.Form index Identity (Html ()) Forge.Field IsolatingError Text
+requiredTextareaField =
+  Forge.ParseForm
+    (\t ->
+       pure
+         (if T.null t
+            then Left TextNotProvided
+            else Right t))
+    (Forge.FieldForm Forge.DynamicFieldName (Forge.TextareaField Nothing))
 
 dropdownField ::
      Eq a
