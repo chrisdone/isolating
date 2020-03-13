@@ -59,15 +59,19 @@ Member
   group GroupId
   code Text
   created UTCTime
-  status Status Maybe
+  joined UTCTime Maybe
+  password Text Maybe
+  condition Condition Maybe
   title Text
+  updated UTCTime
   Unique MemberCodeGroup group code
 Message
   member MemberId
   group GroupId
-  text Text
+  condition Condition
+  title Text
+  desc Text
   created UTCTime
-  joined UTCTime Maybe
 |]
 
 mkYesod "App" [parseRoutes|
@@ -75,15 +79,66 @@ mkYesod "App" [parseRoutes|
   / HomeR GET
   /create-group CreateGroupR POST GET
   /dashboard DashboardR GET
-  /post PostR GET
+  /post PostR GET POST
+  /password PassR GET POST
 |]
 
 --------------------------------------------------------------------------------
 -- Routes
 
+getPassR :: Handler (Html ())
+getPassR = do
+  (groupId, _memberId) <- getSessionInfo
+  Group {..} <-
+    runDB
+      (do grp <- get404 groupId
+          pure grp)
+  htmlWithUrl
+    (layoutWrapper
+       (div_
+          [class_ "wrap"]
+          (do h2_ "Set password"
+              url <- ask
+              form_
+                [action_ (url PassR), method_ "POST"]
+                (do relaxHtmlT (Forge.view (Forge.verified savePassForm))
+                    p_ (button_ "SAVE")))))
+
+postPassR :: Handler (Html ())
+postPassR = do
+  (_groupId, memberId) <- getSessionInfo
+  (inputs, _files) <- runRequestBody
+  let inputMap =
+        (M.fromListWith
+           (<>)
+           (map (first Forge.Key . second (pure . Forge.TextInput)) inputs))
+  case runIdentity (Forge.generate inputMap (Forge.verified savePassForm)) of
+    Forge.Generated {generatedView = html, generatedValue = v} ->
+      case v of
+        Failure _errs ->
+          htmlWithUrl
+            (layoutWrapper
+               (div_
+                  [class_ "wrap"]
+                  (do h2_ "Set password"
+                      url <- ask
+                      form_
+                        [action_ (url PassR), method_ "POST"]
+                        (do relaxHtmlT html
+                            p_ (button_ "SAVE")))))
+        Success pass -> do
+          now <- liftIO getCurrentTime
+          runDB
+            (do update
+                  memberId
+                  [ MemberJoined =. pure now
+                  , MemberPassword =. pure pass
+                  ])
+          redirect DashboardR
+
 getPostR :: Handler (Html ())
 getPostR = do
-  (groupId, memberId) <- getSessionInfo
+  (groupId, _memberId) <- getSessionInfo
   Group {..} <-
     runDB
       (do grp <- get404 groupId
@@ -101,9 +156,57 @@ getPostR = do
                 (do relaxHtmlT (Forge.view (Forge.verified postUpdateForm))
                     p_ (button_ "POST UPDATE")))))
 
+postPostR :: Handler (Html ())
+postPostR = do
+  (groupId, memberId) <- getSessionInfo
+  Group {..} <-
+    runDB
+      (do grp <- get404 groupId
+          pure grp)
+  (inputs, _files) <- runRequestBody
+  let inputMap =
+        (M.fromListWith
+           (<>)
+           (map (first Forge.Key . second (pure . Forge.TextInput)) inputs))
+  case runIdentity (Forge.generate inputMap (Forge.verified postUpdateForm)) of
+    Forge.Generated {generatedView = html, generatedValue = v} ->
+      case v of
+        Failure _errs ->
+          htmlWithUrl
+            (layoutWrapper
+               (div_
+                  [class_ "wrap"]
+                  (do h2_
+                        (do "Post update for "
+                            toHtml groupPostcode)
+                      url <- ask
+                      form_
+                        [action_ (url PostR), method_ "POST"]
+                        (do relaxHtmlT html
+                            p_ (button_ "POST UPDATE")))))
+        Success UpdateInfo {condition, title, desc} -> do
+          now <- liftIO getCurrentTime
+          runDB
+            (do insert_
+                  Message
+                    { messageMember = memberId
+                    , messageGroup = groupId
+                    , messageCondition = condition
+                    , messageTitle = title
+                    , messageDesc = desc
+                    , messageCreated = now
+                    }
+                update
+                  memberId
+                  [ MemberCondition =. pure condition
+                  , MemberTitle =. title
+                  , MemberUpdated =. now
+                  ])
+          redirect DashboardR
+
 getDashboardR :: Handler (Html ())
 getDashboardR = do
-  (groupId, memberId) <- getSessionInfo
+  (groupId, _memberId) <- getSessionInfo
   Group {..} <-
     runDB
       (do grp <- get404 groupId
@@ -151,8 +254,11 @@ postCreateGroupR = do
                       { memberGroup = gid
                       , memberCode
                       , memberCreated = now
-                      , memberStatus = Nothing
+                      , memberCondition = Nothing
                       , memberTitle = ""
+                      , memberJoined = pure now
+                      , memberUpdated = now
+                      , memberPassword = Nothing
                       }
                   pure (gid, memberId))
           setSession "groupId" (T.pack (show (fromSqlKey groupId)))
@@ -172,7 +278,7 @@ getHomeR = do
                       (do h2_ "I have a code"
                           p_
                             "If someone has created a group for your street or apartment block, \
-                                         \you should have received a code in your letterbox or in person."
+                           \you should have received a code in your letterbox or in person."
                           url <- ask
                           form_
                             [action_ (url HomeR), method_ "POST"]
@@ -204,7 +310,9 @@ getHomeR = do
                  p_
                    "To provide privacy for communities. You can only get a code if a group creator \
                                 \as provided you with one, via your letterbox or handed to you in person. This \
-                               \protects against abuse.")))
+                               \protects against abuse."
+                 p_ "We do not accept phone numbers or email addresses in order \
+                    \to protect the privacy of participants.")))
 
 --------------------------------------------------------------------------------
 -- Page wrapper
@@ -255,8 +363,18 @@ createGroupForm =
                        html))
        postcodeField)
 
+savePassForm :: Forge.Form index Identity (Html ()) Forge.Field IsolatingError Text
+savePassForm =
+  wrapErrorsAllowBubble
+    "Password"
+    (wrapHtml
+       (\html -> p_
+                   (do label_ "Password: "
+                       html))
+       requiredPasswordField)
+
 data UpdateInfo = UpdateInfo
-  { healthStatus :: Status
+  { condition :: Condition
   , title :: Text
   , desc :: Text
   }
@@ -277,12 +395,14 @@ postUpdateForm =
              (\x -> (x, T.pack (show x)))
              (pure Asymptomatic <> pure Isolating <> pure Recovered)))) <*>
   wrapErrorsAllowBubble
-    "Title"
+    "Address/Name"
     (wrapHtml
        (\html ->
-          p_
-            (do label_ "Title: "
-                html))
+          do p_
+               (do label_ "Address/Name: "
+                   html
+                   )
+             p_ "E.g. Flat 12, or Mrs Robinson. You don't have to put your name.")
        requiredTextField) <*>
   wrapErrorsAllowBubble
     "Comment"
@@ -290,7 +410,7 @@ postUpdateForm =
        (\html -> do
           p_ (label_ "Comment: ")
           p_ html)
-       requiredTextareaField)
+       optionalTextareaField)
 
 --------------------------------------------------------------------------------
 -- Fields
@@ -365,6 +485,16 @@ requiredTextField =
             else Right t))
     (Forge.FieldForm Forge.DynamicFieldName (Forge.TextField Nothing))
 
+requiredPasswordField :: Forge.Form index Identity (Html ()) Forge.Field IsolatingError Text
+requiredPasswordField =
+  Forge.ParseForm
+    (\t ->
+       pure
+         (if T.null t
+            then Left TextNotProvided
+            else Right t))
+    (Forge.FieldForm Forge.DynamicFieldName (Forge.PasswordField Nothing))
+
 requiredTextareaField :: Forge.Form index Identity (Html ()) Forge.Field IsolatingError Text
 requiredTextareaField =
   Forge.ParseForm
@@ -374,6 +504,10 @@ requiredTextareaField =
             then Left TextNotProvided
             else Right t))
     (Forge.FieldForm Forge.DynamicFieldName (Forge.TextareaField Nothing))
+
+optionalTextareaField :: Forge.Form index Identity (Html ()) Forge.Field IsolatingError Text
+optionalTextareaField =
+  Forge.FieldForm Forge.DynamicFieldName (Forge.TextareaField Nothing)
 
 dropdownField ::
      Eq a

@@ -2,7 +2,7 @@
 
 -- |
 
-module Types (Status(..)) where
+module Types (Condition(..)) where
 
 import           Control.Monad.Catch (SomeException)
 import           Control.Monad.Logger
@@ -27,9 +27,9 @@ import           Yesod hiding (Html)
 import           Yesod.Lucid
 
 
-data Status
+data Condition
   = Asymptomatic
   | Isolating
   | Recovered
   deriving (Eq, Show, Read)
-$(derivePersistField "Status")
+$(derivePersistField "Condition")

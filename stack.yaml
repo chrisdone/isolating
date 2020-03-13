@@ -3,6 +3,6 @@ packages:
 - .
 extra-deps:
 - github: chrisdone/forge
-  commit: b2466f08617cde6fe850197a09eb80bf81ce55b6
+  commit: ebc274aa9856db7796ebc16e39bbef3bac1041a8
 - github: chrisdone/yesod-lucid
   commit: cde88d0736a44163be70044a109798f578151db3
