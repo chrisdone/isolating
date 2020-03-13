@@ -1,3 +1,5 @@
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
@@ -14,12 +16,16 @@
 import           Control.Monad.Logger
 import           Control.Monad.Reader
 import           Data.Bifunctor
+import           Data.Char
 import           Data.Functor.Identity
 import           Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.Map.Strict as M
 import           Data.Pool
 import           Data.Text (Text)
+import qualified Data.Text as T
 import           Data.Time
+import qualified Data.UUID as UUID
+import qualified Data.UUID.V4 as UUID
 import           Data.Validation
 import           Database.Persist.Postgresql
 import qualified Forge.Generate as Forge
@@ -28,6 +34,7 @@ import qualified Forge.Lucid as Forge
 import qualified Forge.Verify as Forge
 import           Lucid
 import           Text.Lucius
+import           Text.Read (readMaybe)
 import           Types
 import           Yesod hiding (Html, toHtml, textField)
 import           Yesod.Lucid
@@ -44,7 +51,7 @@ instance YesodPersist App where
         App pool <- getYesod
         runSqlPool action pool
 
-share [mkPersist sqlSettings] [persistLowerCase|
+share [mkPersist sqlSettings, mkMigrate "migrateAll"] [persistLowerCase|
 Group
   postcode Text
   created UTCTime
@@ -54,6 +61,7 @@ Member
   created UTCTime
   status Status Maybe
   title Text
+  Unique MemberCodeGroup group code
 Message
   member MemberId
   group GroupId
@@ -65,11 +73,35 @@ Message
 mkYesod "App" [parseRoutes|
   /appcss AppCssR GET
   / HomeR GET
-  /create-group CreateGroupR POST
+  /create-group CreateGroupR POST GET
+  /dashboard DashboardR GET
 |]
 
 --------------------------------------------------------------------------------
 -- Routes
+
+getDashboardR :: Handler (Html ())
+getDashboardR = do
+  (groupId, memberId) <- getSessionInfo
+  Group {..} <-
+    runDB
+      (do grp <- get404 groupId
+          pure grp)
+  htmlWithUrl
+    (layoutWrapper
+       (div_
+          [class_ "wrap"]
+          (h2_
+             (do "Dashboard for "
+                 toHtml groupPostcode))))
+
+getCreateGroupR :: Handler (Html ())
+getCreateGroupR =
+  htmlWithUrl
+    (layoutWrapper
+       (div_
+          [class_ "wrap"]
+          (startGroupHtml (Forge.view (Forge.verified createGroupForm)))))
 
 postCreateGroupR :: Handler (Html ())
 postCreateGroupR = do
@@ -84,7 +116,25 @@ postCreateGroupR = do
         Failure _errs ->
           htmlWithUrl
             (layoutWrapper (div_ [class_ "wrap"] (startGroupHtml html)))
-        Success postCode -> pure "OK, making!"
+        Success postCode -> do
+          memberCode <- liftIO generateCode
+          now <- liftIO getCurrentTime
+          (groupId, memberId) <-
+            runDB
+              (do gid <-
+                    insert Group {groupPostcode = postCode, groupCreated = now}
+                  memberId <- insert
+                    Member
+                      { memberGroup = gid
+                      , memberCode
+                      , memberCreated = now
+                      , memberStatus = Nothing
+                      , memberTitle = ""
+                      }
+                  pure (gid, memberId))
+          setSession "groupId" (T.pack (show (fromSqlKey groupId)))
+          setSession "memberId" (T.pack (show (fromSqlKey memberId)))
+          redirect DashboardR
 
 getHomeR :: Handler (Html ())
 getHomeR = do
@@ -144,14 +194,14 @@ layoutWrapper inner = do
   html_
     (do head_
           (do link_ [rel_ "shortcut icon", href_ "#"]
-              title_ "Self Isolating Coronavirus (COVID-19)"
+              title_ "Self Isolating with Coronavirus (COVID-19)"
               link_ [rel_ "stylesheet", type_ "text/css", href_ (url AppCssR)])
         body_
           (do div_
                 [class_ "heading"]
                 (div_
                    [class_ "wrap"]
-                   (h1_ "Self Isolating Coronavirus (COVID-19)"))
+                   (h1_ (a_ [href_ (url HomeR)] "Self Isolating with Coronavirus (COVID-19)")))
               inner))
 
 --------------------------------------------------------------------------------
@@ -165,7 +215,7 @@ startGroupHtml formHtml = do
                        \already a group created for your street or apartment block."
   url <- ask
   form_
-    [action_ (url HomeR), method_ "POST"]
+    [action_ (url CreateGroupR), method_ "POST"]
     (do relaxHtmlT formHtml
         p_ (button_ "GET CODE"))
 
@@ -180,13 +230,27 @@ createGroupForm =
        (\html -> p_
                    (do label_ "Postcode: "
                        html))
-       textField)
+       postcodeField)
+
+--------------------------------------------------------------------------------
+-- Fields
+
+postcodeField :: Forge.Form index Identity (Html ()) Forge.Field IsolatingError Text
+postcodeField =
+  Forge.ParseForm
+    (\text ->
+       if T.all (\c -> isAlphaNum c) (T.filter (not . isSpace) text)
+         then pure (Right (T.strip text))
+         else pure (Left InvalidPostCode))
+    requiredTextField
 
 --------------------------------------------------------------------------------
 -- Forge utilities
 
 data IsolatingError
   = LucidError Forge.Error
+  | TextNotProvided
+  | InvalidPostCode
   | ContextedError Text
                    IsolatingError
   deriving (Show)
@@ -205,7 +269,9 @@ wrapErrorsAllowBubble label =
   Forge.CeilingForm
     (\errors html ->
        ( do html
-            ul_ [class_ "inline-errors"] (mapM_ (li_ . showError) errors)
+            unless
+              (null errors)
+              (ul_ [class_ "inline-errors"] (mapM_ (li_ . showError) errors))
        , map (ContextedError label) errors))
 
 wrapHtml ::
@@ -218,6 +284,8 @@ wrapHtml f = Forge.CeilingForm (\es v -> (f v, es))
 showError :: Monad m => IsolatingError -> HtmlT m ()
 showError =
   \case
+    InvalidPostCode -> "Invalid postal or zip code."
+    TextNotProvided -> "No text was provided."
     ContextedError label e -> do
       toHtml label
       ": "
@@ -227,8 +295,15 @@ showError =
         Forge.MissingInput {} -> "Missing input: try resubmitting the form?"
         Forge.InvalidInputFormat {} -> "Invalid input format."
 
-textField :: Forge.Form index parse (Html ()) Forge.Field IsolatingError Text
-textField = Forge.FieldForm Forge.DynamicFieldName (Forge.TextField Nothing)
+requiredTextField :: Forge.Form index Identity (Html ()) Forge.Field IsolatingError Text
+requiredTextField =
+  Forge.ParseForm
+    (\t ->
+       pure
+         (if T.null t
+            then Left TextNotProvided
+            else Right t))
+    (Forge.FieldForm Forge.DynamicFieldName (Forge.TextField Nothing))
 
 dropdownField ::
      Eq a
@@ -237,6 +312,15 @@ dropdownField ::
   -> Forge.Form index parse (Html ()) Forge.Field IsolatingError a
 dropdownField mdef options =
   Forge.FieldForm Forge.DynamicFieldName (Forge.DropdownField mdef options)
+
+--------------------------------------------------------------------------------
+-- Code generation
+
+-- | Generate a 12-character code.
+generateCode :: IO Text
+generateCode = do
+  uuid <- UUID.nextRandom
+  pure (T.take 12 (T.reverse (UUID.toText uuid)))
 
 --------------------------------------------------------------------------------
 -- Static
@@ -249,8 +333,20 @@ getAppCssR = pure ($(luciusFile "templates/app.lucius") ())
 
 main :: IO ()
 main =
-    runNoLoggingT
-      (withPostgresqlPool
-         "dbname=lpaste user=lpaste password=lpaste"
-         10
-         (\pool -> liftIO (warpEnv (App pool))))
+  runNoLoggingT
+    (withPostgresqlPool
+       "dbname=isolating user=isolating password=isolating host=localhost"
+       10
+       (\pool -> do runSqlPool (runMigration migrateAll) pool
+                    liftIO (warpEnv (App pool))))
+
+--------------------------------------------------------------------------------
+-- Session
+
+getSessionInfo :: Handler (GroupId, MemberId)
+getSessionInfo = do
+  gid <- lookupSession "groupId"
+  mid <- lookupSession "memberId"
+  case (,) <$> (gid >>= (readMaybe . T.unpack)) <*> (mid >>= (readMaybe . T.unpack)) of
+    Just (g, m) -> pure (toSqlKey g, toSqlKey m)
+    Nothing -> redirect HomeR

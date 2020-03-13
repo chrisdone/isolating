@@ -47,6 +47,7 @@ dependencies:
 - time
 - forge
 - validation
+- uuid
 
 library:
   source-dirs: src
