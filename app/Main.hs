@@ -81,10 +81,77 @@ mkYesod "App" [parseRoutes|
   /dashboard DashboardR GET
   /post PostR GET POST
   /password PassR GET POST
+  /login LoginR GET POST
+  /unlock UnlockR GET POST
 |]
 
 --------------------------------------------------------------------------------
 -- Routes
+
+getLoginR :: Handler (Html ())
+getLoginR = do
+  htmlWithUrl
+    (layoutWrapper
+       (div_
+          [class_ "wrap"]
+          (do h2_ "Login"
+              url <- ask
+              form_
+                [action_ (url LoginR), method_ "POST"]
+                (do relaxHtmlT (Forge.view (Forge.verified loginForm))
+                    p_ (button_ "LOGIN")))))
+
+postLoginR :: Handler (Html ())
+postLoginR = do
+  (inputs, _files) <- runRequestBody
+  let inputMap =
+        (M.fromListWith
+           (<>)
+           (map (first Forge.Key . second (pure . Forge.TextInput)) inputs))
+  case runIdentity (Forge.generate inputMap (Forge.verified loginForm)) of
+    Forge.Generated {generatedView = html, generatedValue = v} ->
+      case v of
+        Failure _errs ->
+          htmlWithUrl
+            (layoutWrapper
+               (div_
+                  [class_ "wrap"]
+                  (do h2_ "Login"
+                      url <- ask
+                      form_
+                        [action_ (url LoginR), method_ "POST"]
+                        (do relaxHtmlT html
+                            p_ (button_ "LOGIN")))))
+        Success (postcode, code) -> do
+          mmember <-
+            runDB
+              (do groups <- selectList [GroupPostcode ==. postcode] []
+                  selectFirst
+                    [ MemberGroup <-. [groupId | Entity groupId _ <- groups]
+                    , MemberCode ==. code
+                    ]
+                    [])
+          case mmember of
+            Nothing ->
+              htmlWithUrl
+                (layoutWrapper
+                   (div_
+                      [class_ "wrap"]
+                      (do h2_ "Login"
+                          url <- ask
+                          form_
+                            [action_ (url LoginR), method_ "POST"]
+                            (do ul_
+                                  [class_ "inline-errors"]
+                                  (li_ "Incorrect details.")
+                                relaxHtmlT html
+                                p_ (button_ "LOGIN")))))
+            Just (Entity memberId Member {..}) -> do
+              setSession "nearly_groupId" (T.pack (show (fromSqlKey memberGroup)))
+              setSession "nearly_memberId" (T.pack (show (fromSqlKey memberId)))
+              case memberPassword of
+                Nothing -> redirect PassR
+                Just {} -> redirect UnlockR
 
 getPassR :: Handler (Html ())
 getPassR = do
@@ -137,6 +204,73 @@ postPassR = do
                   , MemberPassword =. pure pass
                   ])
           redirect DashboardR
+
+getUnlockR :: Handler (Html ())
+getUnlockR = do
+  (groupId, _memberId) <- getSessionInfo
+  Group {..} <-
+    runDB
+      (do grp <- get404 groupId
+          pure grp)
+  htmlWithUrl
+    (layoutWrapper
+       (div_
+          [class_ "wrap"]
+          (do h2_ "Unlock your account"
+              p_ "Your account has been protected by a password to keep your details safe."
+              p_ "Please enter it now."
+              url <- ask
+              form_
+                [action_ (url UnlockR), method_ "POST"]
+                (do relaxHtmlT (Forge.view (Forge.verified enterPassForm))
+                    p_ (button_ "SAVE")))))
+
+postUnlockR :: Handler (Html ())
+postUnlockR = do
+  (groupId, memberId) <- getNearlySessionInfo
+  (Group {..}, Member {..}) <-
+    runDB
+      (do grp <- get404 groupId
+          mem <- get404 memberId
+          pure (grp, mem))
+  (inputs, _files) <- runRequestBody
+  let inputMap =
+        (M.fromListWith
+           (<>)
+           (map (first Forge.Key . second (pure . Forge.TextInput)) inputs))
+  case runIdentity (Forge.generate inputMap (Forge.verified enterPassForm)) of
+    Forge.Generated {generatedView = html, generatedValue = v} ->
+      case v of
+        Failure _errs ->
+          htmlWithUrl
+            (layoutWrapper
+               (div_
+                  [class_ "wrap"]
+                  (do h2_ "Unlock "
+                      url <- ask
+                      form_
+                        [action_ (url PassR), method_ "POST"]
+                        (do relaxHtmlT html
+                            p_ (button_ "SAVE")))))
+        Success pass -> do
+          if pure pass == memberPassword
+            then do
+              setSession "groupId" (T.pack (show (fromSqlKey groupId)))
+              setSession "memberId" (T.pack (show (fromSqlKey memberId)))
+              redirect DashboardR
+            else htmlWithUrl
+                   (layoutWrapper
+                      (div_
+                         [class_ "wrap"]
+                         (do h2_ "Unlock "
+                             url <- ask
+                             form_
+                               [action_ (url PassR), method_ "POST"]
+                               (do ul_
+                                     [class_ "inline-errors"]
+                                     (li_ "Bad password.")
+                                   relaxHtmlT html
+                                   p_ (button_ "SAVE")))))
 
 getPostR :: Handler (Html ())
 getPostR = do
@@ -289,13 +423,8 @@ getHomeR = do
                            \you should have received a code in your letterbox or in person."
                           url <- ask
                           form_
-                            [action_ (url HomeR), method_ "POST"]
-                            (do p_
-                                  (do label_ "Postcode: "
-                                      input_ [type_ "text", name_ "postcode"])
-                                p_
-                                  (do label_ "Member Code: "
-                                      input_ [type_ "text", name_ "code"])
+                            [action_ (url LoginR), method_ "POST"]
+                            (do relaxHtmlT (Forge.view (Forge.verified loginForm))
                                 p_ (button_ "LOGIN")))
                     div_
                       [class_ "choice"]
@@ -361,6 +490,26 @@ startGroupHtml formHtml = do
 --------------------------------------------------------------------------------
 -- Forms
 
+loginForm :: Forge.Form index Identity (Html ()) Forge.Field IsolatingError (Text, Text)
+loginForm =
+  (,) <$>
+  wrapErrorsAllowBubble
+    "Postcode"
+    (wrapHtml
+       (\html ->
+          p_
+            (do label_ "Postcode: "
+                html))
+       postcodeField) <*>
+  wrapErrorsAllowBubble
+    "Member Code"
+    (wrapHtml
+       (\html ->
+          p_
+            (do label_ "Member Code: "
+                html))
+       requiredTextField)
+
 createGroupForm :: Forge.Form index Identity (Html ()) Forge.Field IsolatingError Text
 createGroupForm =
   wrapErrorsAllowBubble
@@ -373,6 +522,16 @@ createGroupForm =
 
 savePassForm :: Forge.Form index Identity (Html ()) Forge.Field IsolatingError Text
 savePassForm =
+  wrapErrorsAllowBubble
+    "Password"
+    (wrapHtml
+       (\html -> p_
+                   (do label_ "Password: "
+                       html))
+       requiredPasswordField)
+
+enterPassForm :: Forge.Form index Identity (Html ()) Forge.Field IsolatingError Text
+enterPassForm =
   wrapErrorsAllowBubble
     "Password"
     (wrapHtml
@@ -562,3 +721,11 @@ getSessionInfo = do
   case (,) <$> (gid >>= (readMaybe . T.unpack)) <*> (mid >>= (readMaybe . T.unpack)) of
     Just (g, m) -> pure (toSqlKey g, toSqlKey m)
     Nothing -> redirect HomeR
+
+getNearlySessionInfo :: Handler (GroupId, MemberId)
+getNearlySessionInfo = do
+  gid <- lookupSession "nearly_groupId"
+  mid <- lookupSession "nearly_memberId"
+  case (,) <$> (gid >>= (readMaybe . T.unpack)) <*> (mid >>= (readMaybe . T.unpack)) of
+    Just (g, m) -> pure (toSqlKey g, toSqlKey m)
+    Nothing -> redirect LoginR
