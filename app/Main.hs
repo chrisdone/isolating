@@ -64,6 +64,7 @@ Member
   condition Condition Maybe
   title Text
   updated UTCTime
+  origin MemberId Maybe
   Unique MemberCodeGroup group code
 Message
   member MemberId
@@ -83,10 +84,55 @@ mkYesod "App" [parseRoutes|
   /password PassR GET POST
   /login LoginR GET POST
   /unlock UnlockR GET POST
+  /generate GenerateR GET POST
 |]
 
 --------------------------------------------------------------------------------
 -- Routes
+
+postGenerateR :: Handler (Html ())
+postGenerateR = do
+  (groupId, memberId) <- getSessionInfo
+  memberCode <- liftIO generateCode
+  now <- liftIO getCurrentTime
+  runDB
+    (insert_
+       Member
+         { memberGroup = groupId
+         , memberCode
+         , memberCreated = now
+         , memberCondition = Nothing
+         , memberTitle = ""
+         , memberJoined = Nothing
+         , memberUpdated = now
+         , memberPassword = Nothing
+         , memberOrigin = pure memberId
+         })
+  redirect GenerateR
+
+getGenerateR :: Handler (Html ())
+getGenerateR = do
+  (_groupId, memberId) <- getSessionInfo
+  members <-
+    runDB
+      (selectList
+         [MemberOrigin ==. pure memberId, MemberJoined ==. Nothing]
+         [Asc MemberCreated])
+  htmlWithUrl
+    (layoutWrapper
+       (do div_
+             [class_ "wrap"]
+             (do h2_ "Invite Codes"
+                 url <- ask
+                 form_
+                   [action_ (url GenerateR), method_ "POST"]
+                   (p_ (button_ "generate code"))
+                 if null members
+                   then p_ "None yet."
+                   else forM_
+                          members
+                          (\(Entity _ Member {..}) ->
+                             div_ [class_ "invite-code"] (toHtml memberCode)))))
 
 getLoginR :: Handler (Html ())
 getLoginR = do
@@ -207,7 +253,7 @@ postPassR = do
 
 getUnlockR :: Handler (Html ())
 getUnlockR = do
-  (groupId, _memberId) <- getSessionInfo
+  (groupId, _memberId) <- getNearlySessionInfo
   Group {..} <-
     runDB
       (do grp <- get404 groupId
@@ -283,9 +329,7 @@ getPostR = do
     (layoutWrapper
        (div_
           [class_ "wrap"]
-          (do h2_
-                (do "Post update for "
-                    toHtml groupPostcode)
+          (do h2_ "Post update"
               url <- ask
               form_
                 [action_ (url PostR), method_ "POST"]
@@ -343,11 +387,11 @@ postPostR = do
 getDashboardR :: Handler (Html ())
 getDashboardR = do
   (groupId, memberId) <- getSessionInfo
-  (Group {..},Member{..}) <-
+  (Group {..}, Member {..}) <-
     runDB
       (do grp <- get404 groupId
           mem <- get404 memberId
-          pure (grp,mem))
+          pure (grp, mem))
   htmlWithUrl
     (layoutWrapper
        (div_
@@ -355,13 +399,17 @@ getDashboardR = do
           (do h2_
                 (do "Dashboard for "
                     toHtml groupPostcode)
-              p_ (do "Your personal login code is: "
-                     strong_ (code_ (toHtml memberCode))
-                     " (Don't lose this.)")
+              p_
+                (do "Your personal login code is: "
+                    strong_ (code_ (toHtml memberCode))
+                    " (Don't lose this.)")
               url <- ask
-              p_ (do a_ [href_ (url PostR)] "Post an update"
-                     " | "
-                     a_ [href_ (url PassR)] "Change password"))))
+              p_
+                (do a_ [href_ (url PostR)] "Post an update"
+                    " | "
+                    a_ [href_ (url PassR)] "Change password"
+                    " | "
+                    a_ [href_ (url GenerateR)] "Generate codes"))))
 
 getCreateGroupR :: Handler (Html ())
 getCreateGroupR =
@@ -401,6 +449,7 @@ postCreateGroupR = do
                       , memberJoined = pure now
                       , memberUpdated = now
                       , memberPassword = Nothing
+                      , memberOrigin = Nothing
                       }
                   pure (gid, memberId))
           setSession "groupId" (T.pack (show (fromSqlKey groupId)))
