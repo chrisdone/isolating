@@ -1,0 +1,42 @@
+body, button {
+  font-family: "nta", Arial, sans-serif;
+  font-weight: 400;
+}
+body {
+  padding: 0;
+  font-size: 24px;
+  margin: 0;
+}
+.heading {
+  background: black;
+  color: white;
+
+  h1 {
+    margin-top: 0;
+    padding-bottom: 5px;
+    padding-top: 5px;
+  }
+}
+.wrap {
+  padding-left: 20px;
+  padding-right: 20px;
+  margin-left: auto;
+  margin-right: auto;
+  max-width: 1024px;
+}
+.home-choice {
+  .choice {
+  }
+}
+button {
+  font-size: 20px;
+  background: green;
+  color: white;
+  font-weight: bold;
+  text-transform: uppercase;
+  border: 0;
+  padding-top: 5px;
+  padding-bottom: 5px;
+  padding-left: 10px;
+  padding-right: 10px;
+}

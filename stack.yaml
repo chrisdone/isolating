@@ -1,0 +1,8 @@
+resolver: lts-14.20
+packages:
+- .
+extra-deps:
+- github: chrisdone/forge
+  commit: b11501f469498b061e187ec0a4a7d3969eaa427a
+- github: chrisdone/yesod-lucid
+  commit: cde88d0736a44163be70044a109798f578151db3
