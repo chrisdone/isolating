@@ -609,6 +609,7 @@ staticHome =
                          "Coronavirus (COVID-19): what you need to do")
                  p_
                    "This is a voluntarily run service to aid small communities (streets and tower blocks) to self-report, coordinate, and ask for help, during the self-isolation stage of this pandemic."
+                 p_ "The only data we will collect and publish is how many cases of each condition (asymptomatic, isolating, recovered) for each post code."
                  p_ (strong_ "Isolating.org is NOT a government-run web site.")
                  h3_ "Why are codes needed?"
                  p_
