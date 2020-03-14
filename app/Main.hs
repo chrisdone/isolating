@@ -878,13 +878,15 @@ getAppCssR = pure ($(luciusFile "templates/app.lucius") ())
 -- Main entry point
 
 main :: IO ()
-main =
-  runNoLoggingT
+main = do
+  putStrLn "Connecting..."
+  runStdoutLoggingT
     (withPostgresqlPool
        "dbname=isolating user=isolating password=isolating host=localhost"
        46
-       (\pool -> do runSqlPool (runMigration migrateAll) pool
-                    liftIO (warpEnv (App pool))))
+       (\pool -> do
+          runSqlPool (runMigration migrateAll) pool
+          liftIO (warpEnv (App pool))))
 
 --------------------------------------------------------------------------------
 -- Session
