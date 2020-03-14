@@ -18,9 +18,14 @@ import           Control.Monad.Reader
 import           Data.Bifunctor
 import           Data.Char
 import           Data.Functor.Identity
+import           Data.List (sortBy)
 import           Data.List.NonEmpty (NonEmpty(..))
+import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
+import           Data.Ord
 import           Data.Pool
+import           Data.Set (Set)
+import qualified Data.Set as Set
 import           Data.Text (Text)
 import qualified Data.Text as T
 import           Data.Time
@@ -364,11 +369,12 @@ postUnlockR = do
 
 getPostR :: Handler (Html ())
 getPostR = do
-  (groupId, _memberId) <- getSessionInfo
-  Group {..} <-
+  (groupId, memberId) <- getSessionInfo
+  (Group {..}, Member {..}) <-
     runDB
       (do grp <- get404 groupId
-          pure grp)
+          mem <- get404 memberId
+          pure (grp, mem))
   htmlWithUrl
     (layoutWrapper
        (div_
@@ -377,7 +383,13 @@ getPostR = do
               url <- ask
               form_
                 [action_ (url PostR), method_ "POST"]
-                (do relaxHtmlT (Forge.view (Forge.verified postUpdateForm))
+                (do relaxHtmlT
+                      (Forge.view
+                         (Forge.verified
+                            (postUpdateForm
+                               (do condition <- memberCondition
+                                   title <- pure memberTitle
+                                   pure UpdateInfo {condition, title, desc = ""}))))
                     p_ (button_ "POST UPDATE")))))
 
 postPostR :: Handler (Html ())
@@ -392,7 +404,7 @@ postPostR = do
         (M.fromListWith
            (<>)
            (map (first Forge.Key . second (pure . Forge.TextInput)) inputs))
-  case runIdentity (Forge.generate inputMap (Forge.verified postUpdateForm)) of
+  case runIdentity (Forge.generate inputMap (Forge.verified (postUpdateForm Nothing))) of
     Forge.Generated {generatedView = html, generatedValue = v} ->
       case v of
         Failure _errs ->
@@ -431,11 +443,12 @@ postPostR = do
 getDashboardR :: Handler (Html ())
 getDashboardR = do
   (groupId, memberId) <- getSessionInfo
-  (Group {..}, Member {..}) <-
+  (Group {..}, Member {..}, updates) <-
     runDB
       (do grp <- get404 groupId
           mem <- get404 memberId
-          pure (grp, mem))
+          updates <- generateUpdates groupId grp mem memberId
+          pure (grp, mem, updates))
   htmlWithUrl
     (layoutWrapper
        (div_
@@ -456,7 +469,54 @@ getDashboardR = do
                     " | "
                     a_ [href_ (url PassR)] "Change password"
                     " | "
-                    a_ [href_ (url GenerateR)] "Generate codes"))))
+                    a_ [href_ (url GenerateR)] "Generate codes")
+              hr_ []
+              updates)))
+
+generateUpdates groupId group member memberId = do
+  updates <- selectList [MessageGroup ==. groupId] [Desc MessageCreated]
+  pure
+    (if null updates
+       then do
+         url <- ask
+         p_
+           (do "There are no updates yet. Please "
+               a_ [href_ (url PostR)] "post an update"
+               "!")
+       else do
+         url <- ask
+         when
+           (not
+              (any
+                 (\Message {messageMember} -> messageMember == memberId)
+                 (map entityVal updates)))
+           (ul_
+              [class_ "inline-errors"]
+              (li_
+                 (do "You haven't posted an update of your condition yet! Please "
+                     a_ [href_ (url PostR)] "post an update"
+                     "!")))
+         forM_
+           (dedup updates)
+           (\(Entity mid Message {..}) ->
+              div_
+                [ class_
+                    (if memberId == messageMember
+                       then "update yours"
+                       else "update")
+                ]
+                (do h3_ (toHtml messageTitle)
+                    p_
+                      (do strong_ "Condition: "
+                          toHtml (show messageCondition))
+                    p_ (toHtml messageDesc)
+                    p_ (em_ (toHtml (show messageCreated))))))
+  where
+    dedup =
+      sortBy (flip (comparing entityKey)) .
+      M.elems .
+      M.fromList .
+      map (\m@(Entity mid Message {messageMember}) -> (messageMember, m))
 
 getCreateGroupR :: Handler (Html ())
 getCreateGroupR =
@@ -614,7 +674,7 @@ loginForm =
           p_
             (do label_ "Member Code: "
                 html))
-       requiredTextField)
+       (requiredTextField Nothing))
 
 createGroupForm :: Forge.Form index Identity (Html ()) Forge.Field IsolatingError Text
 createGroupForm =
@@ -652,8 +712,8 @@ data UpdateInfo = UpdateInfo
   , desc :: Text
   }
 
-postUpdateForm :: Forge.Form index Identity (Html ()) Forge.Field IsolatingError UpdateInfo
-postUpdateForm =
+postUpdateForm :: Maybe UpdateInfo -> Forge.Form index Identity (Html ()) Forge.Field IsolatingError UpdateInfo
+postUpdateForm minfo =
   UpdateInfo <$>
   wrapErrorsAllowBubble
     "Condition"
@@ -663,25 +723,24 @@ postUpdateForm =
             (do label_ "Condition: "
                 html))
        (dropdownField
-          Nothing
+          (fmap (\UpdateInfo {condition} -> condition) minfo)
           (fmap
              (\x -> (x, T.pack (show x)))
              (pure Asymptomatic <> pure Isolating <> pure Recovered)))) <*>
   wrapErrorsAllowBubble
     "Address/Name"
     (wrapHtml
-       (\html ->
-          do p_
-               (do label_ "Address/Name: "
-                   html
-                   )
-             p_ "E.g. Flat 12, or Mrs Robinson. You don't have to put your name.")
-       requiredTextField) <*>
+       (\html -> do
+          p_
+            (do label_ "Address/Name: "
+                html)
+          p_ "E.g. Flat 12, or Mrs Robinson. You don't have to put your name.")
+       (requiredTextField (fmap (\UpdateInfo {title} -> title) minfo))) <*>
   wrapErrorsAllowBubble
     "Comment"
     (wrapHtml
        (\html -> do
-          p_ (label_ "Comment: ")
+          p_ (label_ "Comment (optional, no longer than 128 chars): ")
           p_ html)
        optionalTextareaField)
 
@@ -695,7 +754,7 @@ postcodeField =
        if T.all (\c -> isAlphaNum c) (T.filter (not . isSpace) text)
          then pure (Right (T.strip text))
          else pure (Left InvalidPostCode))
-    requiredTextField
+    (requiredTextField Nothing)
 
 --------------------------------------------------------------------------------
 -- Forge utilities
@@ -703,6 +762,7 @@ postcodeField =
 data IsolatingError
   = LucidError Forge.Error
   | TextNotProvided
+  | TextTooLong
   | InvalidPostCode
   | ContextedError Text
                    IsolatingError
@@ -739,6 +799,7 @@ showError =
   \case
     InvalidPostCode -> "Invalid postal or zip code."
     TextNotProvided -> "No text was provided."
+    TextTooLong -> "Text too long. No more than 128 chars."
     ContextedError label e -> do
       toHtml label
       ": "
@@ -748,15 +809,15 @@ showError =
         Forge.MissingInput {} -> "Missing input: try resubmitting the form?"
         Forge.InvalidInputFormat {} -> "Invalid input format."
 
-requiredTextField :: Forge.Form index Identity (Html ()) Forge.Field IsolatingError Text
-requiredTextField =
+requiredTextField :: Maybe Text -> Forge.Form index Identity (Html ()) Forge.Field IsolatingError Text
+requiredTextField mdef =
   Forge.ParseForm
     (\t ->
        pure
          (if T.null t
             then Left TextNotProvided
             else Right t))
-    (Forge.FieldForm Forge.DynamicFieldName (Forge.TextField Nothing))
+    (Forge.FieldForm Forge.DynamicFieldName (Forge.TextField mdef))
 
 requiredPasswordField :: Forge.Form index Identity (Html ()) Forge.Field IsolatingError Text
 requiredPasswordField =
@@ -780,7 +841,12 @@ requiredTextareaField =
 
 optionalTextareaField :: Forge.Form index Identity (Html ()) Forge.Field IsolatingError Text
 optionalTextareaField =
-  Forge.FieldForm Forge.DynamicFieldName (Forge.TextareaField Nothing)
+  Forge.ParseForm
+    (\t ->
+       if T.length t < 128
+         then pure (pure t)
+         else pure (Left TextTooLong))
+    (Forge.FieldForm Forge.DynamicFieldName (Forge.TextareaField Nothing))
 
 dropdownField ::
      Eq a
