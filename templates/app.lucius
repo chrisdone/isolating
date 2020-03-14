@@ -68,8 +68,8 @@ button {
 }
 .update {
   border: 2px solid #ccc;
-  width: 10em;
-  display: inline-block;
+  max-width: 10em;
+  /* display: inline-block; */
   margin-right: 5px;
   padding-left: 5px;
   padding-right: 5px;
@@ -77,4 +77,10 @@ button {
 }
 .update.yours {
   border: 2px solid green;
+}
+.grid {
+display: grid;
+
+  /* define the number of grid columns */
+  grid-template-columns: repeat(4, 1fr);
 }

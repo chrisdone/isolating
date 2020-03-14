@@ -496,26 +496,28 @@ generateUpdates groupId group member memberId = do
                  (do "You haven't posted an update of your condition yet! Please "
                      a_ [href_ (url PostR)] "post an update"
                      "!")))
-         forM_
-           (dedup updates)
-           (\(Entity mid Message {..}) ->
-              div_
-                [ class_
-                    (if memberId == messageMember
-                       then "update yours"
-                       else "update")
-                ]
-                (do h3_ (toHtml messageTitle)
-                    p_
-                      (do strong_ "Condition: "
-                          toHtml (show messageCondition))
-                    p_ (toHtml messageDesc)
-                    p_ (em_ (toHtml (show messageCreated))))))
+         div_
+           [class_ "grid"]
+           (forM_
+              (dedup updates)
+              (\(Entity mid Message {..}) ->
+                 div_
+                   [ class_
+                       (if memberId == messageMember
+                          then "update yours"
+                          else "update")
+                   ]
+                   (do h3_ (toHtml messageTitle)
+                       p_
+                         (do strong_ "Condition: "
+                             toHtml (show messageCondition))
+                       p_ (toHtml messageDesc)
+                       p_ (em_ (toHtml (show messageCreated)))))))
   where
     dedup =
       sortBy (flip (comparing entityKey)) .
       M.elems .
-      M.fromList .
+      M.fromListWith (flip const) .
       map (\m@(Entity mid Message {messageMember}) -> (messageMember, m))
 
 getCreateGroupR :: Handler (Html ())
